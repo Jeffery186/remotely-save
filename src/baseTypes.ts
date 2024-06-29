@@ -3,7 +3,27 @@
  * To avoid circular dependency.
  */
 
-import type { LangType, LangTypeAndAuto } from "./i18n";
+import type {
+  AzureBlobStorageConfig,
+  BoxConfig,
+  GoogleDriveConfig,
+  KoofrConfig,
+  OnedriveFullConfig,
+  PCloudConfig,
+  ProConfig,
+  YandexDiskConfig,
+} from "../pro/src/baseTypesPro";
+import type { LangTypeAndAuto } from "./i18n";
+
+declare global {
+  var DEFAULT_DROPBOX_APP_KEY: string;
+  var DEFAULT_ONEDRIVE_CLIENT_ID: string;
+  var DEFAULT_ONEDRIVE_AUTHORITY: string;
+}
+
+export const DROPBOX_APP_KEY = global.DEFAULT_DROPBOX_APP_KEY;
+export const ONEDRIVE_CLIENT_ID = global.DEFAULT_ONEDRIVE_CLIENT_ID;
+export const ONEDRIVE_AUTHORITY = global.DEFAULT_ONEDRIVE_AUTHORITY;
 
 export const DEFAULT_CONTENT_TYPE = "application/octet-stream";
 
@@ -12,13 +32,19 @@ export type SUPPORTED_SERVICES_TYPE =
   | "webdav"
   | "dropbox"
   | "onedrive"
-  | "webdis";
+  | "onedrivefull"
+  | "webdis"
+  | "googledrive"
+  | "box"
+  | "pcloud"
+  | "yandexdisk"
+  | "koofr"
+  | "azureblobstorage";
 
-export type SUPPORTED_SERVICES_TYPE_WITH_REMOTE_BASE_DIR =
-  | "webdav"
-  | "dropbox"
-  | "onedrive"
-  | "webdis";
+export type SUPPORTED_SERVICES_TYPE_WITH_REMOTE_BASE_DIR = Exclude<
+  SUPPORTED_SERVICES_TYPE,
+  "s3" | "azureblobstorage"
+>;
 
 export interface S3Config {
   s3Endpoint: string;
@@ -89,6 +115,8 @@ export interface OnedriveConfig {
   username: string;
   credentialsShouldBeDeletedAtTime?: number;
   remoteBaseDir?: string;
+  emptyFile: "skip" | "error";
+  kind: "onedrive";
 }
 
 export interface WebdisConfig {
@@ -101,18 +129,33 @@ export interface WebdisConfig {
 export type SyncDirectionType =
   | "bidirectional"
   | "incremental_pull_only"
-  | "incremental_push_only";
+  | "incremental_push_only"
+  | "incremental_pull_and_delete_only"
+  | "incremental_push_and_delete_only";
 
 export type CipherMethodType = "rclone-base64" | "openssl-base64" | "unknown";
 
-export type QRExportType = "all_but_oauth2" | "dropbox" | "onedrive";
+export type QRExportType = "basic_and_advanced" | SUPPORTED_SERVICES_TYPE;
+
+export interface ProfilerConfig {
+  enablePrinting?: boolean;
+  recordSize?: boolean;
+}
 
 export interface RemotelySavePluginSettings {
   s3: S3Config;
   webdav: WebdavConfig;
   dropbox: DropboxConfig;
   onedrive: OnedriveConfig;
+  onedrivefull: OnedriveFullConfig;
   webdis: WebdisConfig;
+  googledrive: GoogleDriveConfig;
+  box: BoxConfig;
+  pcloud: PCloudConfig;
+  yandexdisk: YandexDiskConfig;
+  koofr: KoofrConfig;
+  azureblobstorage: AzureBlobStorageConfig;
+
   password: string;
   serviceType: SUPPORTED_SERVICES_TYPE;
   currLogLevel?: string;
@@ -130,7 +173,6 @@ export interface RemotelySavePluginSettings {
   enableStatusBarInfo?: boolean;
   deleteToWhere?: "system" | "obsidian";
   conflictAction?: ConflictActionType;
-  howToCleanEmptyFolder?: EmptyFolderCleanType;
 
   protectModifyPercentage?: number;
   syncDirection?: SyncDirectionType;
@@ -140,6 +182,10 @@ export interface RemotelySavePluginSettings {
   enableMobileStatusBar?: boolean;
 
   encryptionMethod?: CipherMethodType;
+
+  profiler?: ProfilerConfig;
+
+  pro?: ProConfig;
 
   /**
    * @deprecated
@@ -155,6 +201,11 @@ export interface RemotelySavePluginSettings {
    * @deprecated
    */
   logToDB?: boolean;
+
+  /**
+   * @deprecated
+   */
+  howToCleanEmptyFolder?: EmptyFolderCleanType;
 }
 
 export const COMMAND_URI = "remotely-save";
@@ -174,7 +225,10 @@ export const OAUTH2_FORCE_EXPIRE_MILLISECONDS = 1000 * 60 * 60 * 24 * 80;
 
 export type EmptyFolderCleanType = "skip" | "clean_both";
 
-export type ConflictActionType = "keep_newer" | "keep_larger" | "rename_both";
+export type ConflictActionType =
+  | "keep_newer"
+  | "keep_larger"
+  | "smart_conflict";
 
 export type DecisionTypeForMixedEntity =
   | "only_history"
@@ -189,11 +243,11 @@ export type DecisionTypeForMixedEntity =
   | "remote_is_deleted_thus_also_delete_local"
   | "conflict_created_then_keep_local"
   | "conflict_created_then_keep_remote"
-  | "conflict_created_then_keep_both"
+  | "conflict_created_then_smart_conflict"
   | "conflict_created_then_do_nothing"
   | "conflict_modified_then_keep_local"
   | "conflict_modified_then_keep_remote"
-  | "conflict_modified_then_keep_both"
+  | "conflict_modified_then_smart_conflict"
   | "folder_existed_both_then_do_nothing"
   | "folder_existed_local_then_also_create_remote"
   | "folder_existed_remote_then_also_create_local"
@@ -223,6 +277,7 @@ export interface Entity {
   hash?: string;
   etag?: string;
   synthesizedFolder?: boolean;
+  synthesizedFile?: boolean;
 }
 
 export interface UploadedType {
@@ -242,6 +297,8 @@ export interface MixedEntity {
   decisionBranch?: number;
   decision?: DecisionTypeForMixedEntity;
   conflictAction?: ConflictActionType;
+
+  change?: boolean;
 
   sideNotes?: any;
 }

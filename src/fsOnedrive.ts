@@ -1,19 +1,21 @@
+import { CryptoProvider, PublicClientApplication } from "@azure/msal-node";
+import type { AuthenticationProvider } from "@microsoft/microsoft-graph-client";
 import type {
   DriveItem,
   FileSystemInfo,
   UploadSession,
   User,
 } from "@microsoft/microsoft-graph-types";
-import { CryptoProvider, PublicClientApplication } from "@azure/msal-node";
-import { AuthenticationProvider } from "@microsoft/microsoft-graph-client";
 import cloneDeep from "lodash/cloneDeep";
 import { request, requestUrl } from "obsidian";
 import {
   COMMAND_CALLBACK_ONEDRIVE,
   DEFAULT_CONTENT_TYPE,
-  Entity,
+  type Entity,
   OAUTH2_FORCE_EXPIRE_MILLISECONDS,
-  OnedriveConfig,
+  ONEDRIVE_AUTHORITY,
+  ONEDRIVE_CLIENT_ID,
+  type OnedriveConfig,
 } from "./baseTypes";
 import { VALID_REQURL } from "./baseTypesObs";
 import { FakeFs } from "./fsAll";
@@ -24,14 +26,16 @@ const REDIRECT_URI = `obsidian://${COMMAND_CALLBACK_ONEDRIVE}`;
 
 export const DEFAULT_ONEDRIVE_CONFIG: OnedriveConfig = {
   accessToken: "",
-  clientID: process.env.DEFAULT_ONEDRIVE_CLIENT_ID ?? "",
-  authority: process.env.DEFAULT_ONEDRIVE_AUTHORITY ?? "",
+  clientID: ONEDRIVE_CLIENT_ID ?? "",
+  authority: ONEDRIVE_AUTHORITY ?? "",
   refreshToken: "",
   accessTokenExpiresInSeconds: 0,
   accessTokenExpiresAtTime: 0,
   deltaLink: "",
   username: "",
   credentialsShouldBeDeletedAtTime: 0,
+  emptyFile: "skip",
+  kind: "onedrive",
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -260,6 +264,9 @@ const fromDriveItemToEntity = (x: DriveItem, remoteBaseDir: string): Entity => {
   // another possibile prefix
   const FOURTH_COMMON_PREFIX_RAW = `/drive/items/`;
 
+  // when to use decode?
+  const remoteBaseDirEncoded = encodeURIComponent(remoteBaseDir);
+
   if (
     x.parentReference === undefined ||
     x.parentReference === null ||
@@ -275,6 +282,8 @@ const fromDriveItemToEntity = (x: DriveItem, remoteBaseDir: string): Entity => {
     SECOND_COMMON_PREFIX_REGEX
   );
   const matchThirdPrefixRes = fullPathOriginal.match(THIRD_COMMON_PREFIX_REGEX);
+
+  // first
   if (
     matchFirstPrefixRes !== null &&
     fullPathOriginal.startsWith(`${matchFirstPrefixRes[0]}${remoteBaseDir}`)
@@ -282,24 +291,68 @@ const fromDriveItemToEntity = (x: DriveItem, remoteBaseDir: string): Entity => {
     const foundPrefix = `${matchFirstPrefixRes[0]}${remoteBaseDir}`;
     key = fullPathOriginal.substring(foundPrefix.length + 1);
   } else if (
+    matchFirstPrefixRes !== null &&
+    fullPathOriginal.startsWith(
+      `${matchFirstPrefixRes[0]}${remoteBaseDirEncoded}`
+    )
+  ) {
+    const foundPrefix = `${matchFirstPrefixRes[0]}${remoteBaseDirEncoded}`;
+    key = fullPathOriginal.substring(foundPrefix.length + 1);
+  }
+
+  // fifth
+  else if (
     matchFifthPrefixRes !== null &&
     fullPathOriginal.startsWith(`${matchFifthPrefixRes[0]}${remoteBaseDir}`)
   ) {
     const foundPrefix = `${matchFifthPrefixRes[0]}${remoteBaseDir}`;
     key = fullPathOriginal.substring(foundPrefix.length + 1);
   } else if (
+    matchFifthPrefixRes !== null &&
+    fullPathOriginal.startsWith(
+      `${matchFifthPrefixRes[0]}${remoteBaseDirEncoded}`
+    )
+  ) {
+    const foundPrefix = `${matchFifthPrefixRes[0]}${remoteBaseDirEncoded}`;
+    key = fullPathOriginal.substring(foundPrefix.length + 1);
+  }
+
+  // second
+  else if (
     matchSecondPrefixRes !== null &&
     fullPathOriginal.startsWith(`${matchSecondPrefixRes[0]}${remoteBaseDir}`)
   ) {
     const foundPrefix = `${matchSecondPrefixRes[0]}${remoteBaseDir}`;
     key = fullPathOriginal.substring(foundPrefix.length + 1);
   } else if (
+    matchSecondPrefixRes !== null &&
+    fullPathOriginal.startsWith(
+      `${matchSecondPrefixRes[0]}${remoteBaseDirEncoded}`
+    )
+  ) {
+    const foundPrefix = `${matchSecondPrefixRes[0]}${remoteBaseDirEncoded}`;
+    key = fullPathOriginal.substring(foundPrefix.length + 1);
+  }
+
+  // third
+  else if (
     matchThirdPrefixRes !== null &&
     fullPathOriginal.startsWith(`${matchThirdPrefixRes[0]}${remoteBaseDir}`)
   ) {
     const foundPrefix = `${matchThirdPrefixRes[0]}${remoteBaseDir}`;
     key = fullPathOriginal.substring(foundPrefix.length + 1);
-  } else if (x.parentReference.path.startsWith(FOURTH_COMMON_PREFIX_RAW)) {
+  } else if (
+    matchThirdPrefixRes !== null &&
+    fullPathOriginal.startsWith(
+      `${matchThirdPrefixRes[0]}${remoteBaseDirEncoded}`
+    )
+  ) {
+    const foundPrefix = `${matchThirdPrefixRes[0]}${remoteBaseDirEncoded}`;
+    key = fullPathOriginal.substring(foundPrefix.length + 1);
+  }
+
+  // fourth
+  else if (x.parentReference.path.startsWith(FOURTH_COMMON_PREFIX_RAW)) {
     // it's something like
     // /drive/items/<some_id>!<another_id>:/${remoteBaseDir}/<subfolder>
     // with uri encoded!
@@ -317,16 +370,27 @@ const fromDriveItemToEntity = (x: DriveItem, remoteBaseDir: string): Entity => {
       key = x.name;
     } else {
       throw Error(
-        `we meet file/folder and do not know how to deal with it:\n${constructFromDriveItemToEntityError(
-          x
-        )}`
+        `file/folder with /drive/items/, no idea how to deal with it:
+fullPathOriginal=${fullPathOriginal}
+matchFirstPrefixRes=${matchFirstPrefixRes}
+matchFifthPrefixRes=${matchFifthPrefixRes}
+matchSecondPrefixRes=${matchSecondPrefixRes}
+matchThirdPrefixRes=${matchThirdPrefixRes}
+${constructFromDriveItemToEntityError(x)}`
       );
     }
-  } else {
+  }
+
+  // others
+  else {
     throw Error(
-      `we meet file/folder and do not know how to deal with it:\n${constructFromDriveItemToEntityError(
-        x
-      )}`
+      `file/folder, no idea how to deal with it without known prefix:
+fullPathOriginal=${fullPathOriginal}
+matchFirstPrefixRes=${matchFirstPrefixRes}
+matchFifthPrefixRes=${matchFifthPrefixRes}
+matchSecondPrefixRes=${matchSecondPrefixRes}
+matchThirdPrefixRes=${matchThirdPrefixRes}
+${constructFromDriveItemToEntityError(x)}`
     );
   }
 
@@ -344,6 +408,7 @@ const fromDriveItemToEntity = (x: DriveItem, remoteBaseDir: string): Entity => {
     mtimeCli: mtimeCli,
     size: isFolder ? 0 : x.size!,
     sizeRaw: isFolder ? 0 : x.size!,
+    synthesizedFile: false,
     // hash: ?? // TODO
   };
 };
@@ -567,6 +632,7 @@ export class FakeFsOnedrive extends FakeFs {
     // TODO:
     // 20220401: On Android, requestUrl has issue that text becomes base64.
     // Use fetch everywhere instead!
+    // biome-ignore lint/correctness/noConstantCondition: hard code
     if (false /*VALID_REQURL*/) {
       const res = await requestUrl({
         url: theUrl,
@@ -617,6 +683,7 @@ export class FakeFsOnedrive extends FakeFs {
     // TODO:
     // 20220401: On Android, requestUrl has issue that text becomes base64.
     // Use fetch everywhere instead!
+    // biome-ignore lint/correctness/noConstantCondition: hard code
     if (false /*VALID_REQURL*/) {
       const res = await requestUrl({
         url: theUrl,
@@ -658,13 +725,38 @@ export class FakeFsOnedrive extends FakeFs {
     let res = await this._getJson(
       `/drive/special/approot:/${this.remoteBaseDir}:/delta`
     );
-    let driveItems = res.value as DriveItem[];
+    const driveItems = res.value as DriveItem[];
     // console.debug(driveItems);
 
     while (NEXT_LINK_KEY in res) {
       res = await this._getJson(res[NEXT_LINK_KEY]);
       driveItems.push(...cloneDeep(res.value as DriveItem[]));
     }
+
+    // lastly we should have delta link?
+    if (DELTA_LINK_KEY in res) {
+      this.onedriveConfig.deltaLink = res[DELTA_LINK_KEY];
+      await this.saveUpdatedConfigFunc();
+    }
+
+    // unify everything to Entity
+    const unifiedContents = driveItems
+      .map((x) => fromDriveItemToEntity(x, this.remoteBaseDir))
+      .filter((x) => x.key !== "/");
+
+    return unifiedContents;
+  }
+
+  async walkPartial(): Promise<Entity[]> {
+    await this._init();
+
+    const DELTA_LINK_KEY = "@odata.deltaLink";
+
+    const res = await this._getJson(
+      `/drive/special/approot:/${this.remoteBaseDir}:/delta`
+    );
+    const driveItems = res.value as DriveItem[];
+    // console.debug(driveItems);
 
     // lastly we should have delta link?
     if (DELTA_LINK_KEY in res) {
@@ -719,7 +811,7 @@ export class FakeFsOnedrive extends FakeFs {
     } else {
       // https://stackoverflow.com/questions/56479865/creating-nested-folders-in-one-go-onedrive-api
       // use PATCH to create folder recursively!!!
-      let playload: any = {
+      const playload: any = {
         folder: {},
         "@microsoft.graph.conflictBehavior": "replace",
       };
@@ -758,7 +850,8 @@ export class FakeFsOnedrive extends FakeFs {
       content,
       mtime,
       ctime,
-      key
+      key,
+      this.onedriveConfig.emptyFile
     );
   }
 
@@ -767,12 +860,26 @@ export class FakeFsOnedrive extends FakeFs {
     content: ArrayBuffer,
     mtime: number,
     ctime: number,
-    origKey: string
+    origKey: string,
+    emptyFile: "skip" | "error"
   ): Promise<Entity> {
     if (content.byteLength === 0) {
-      throw Error(
-        `${origKey}: Empty file is not allowed in OneDrive, and please write something in it.`
-      );
+      if (emptyFile === "error") {
+        throw Error(
+          `${origKey}: Empty file is not allowed in OneDrive, and please write something in it.`
+        );
+      } else {
+        return {
+          key: origKey,
+          keyRaw: origKey,
+          mtimeSvr: mtime,
+          mtimeCli: mtime,
+          size: 0,
+          sizeRaw: 0,
+          synthesizedFile: true,
+          // hash: ?? // TODO
+        };
+      }
     }
 
     const ctimeStr = new Date(ctime).toISOString();
@@ -869,7 +976,8 @@ export class FakeFsOnedrive extends FakeFs {
       `${key}?$select=@microsoft.graph.downloadUrl`
     );
     const downloadUrl: string = rsp["@microsoft.graph.downloadUrl"];
-    if (VALID_REQURL) {
+    // biome-ignore lint/correctness/noConstantCondition: <explanation>
+    if (false /*VALID_REQURL*/) {
       const content = (
         await requestUrl({
           url: downloadUrl,
@@ -878,10 +986,37 @@ export class FakeFsOnedrive extends FakeFs {
       ).arrayBuffer;
       return content;
     } else {
-      // cannot set no-cache here, will have cors error
-      const content = await (await fetch(downloadUrl)).arrayBuffer();
-      return content;
+      // so strange, sometimes (!!!)
+      // we cannot download the file because of CORS
+      try {
+        // cannot set no-cache here, will have cors error
+        const content = await (
+          await fetch(downloadUrl, { cache: "no-store" })
+        ).arrayBuffer();
+        return content;
+      } catch (e) {
+        // let's try again to bypass the CORS
+        const content = (
+          await requestUrl({
+            url: downloadUrl,
+            headers: { "Cache-Control": "no-cache" },
+          })
+        ).arrayBuffer;
+        return content;
+      }
     }
+  }
+
+  async rename(key1: string, key2: string): Promise<void> {
+    if (key1 === "" || key1 === "/" || key2 === "" || key2 === "/") {
+      return;
+    }
+    const remoteFileName1 = getOnedrivePath(key1, this.remoteBaseDir);
+    const remoteFileName2 = getOnedrivePath(key2, this.remoteBaseDir);
+    await this._init();
+    await this._patchJson(remoteFileName1, {
+      name: remoteFileName2,
+    });
   }
 
   async rm(key: string): Promise<void> {
@@ -925,5 +1060,9 @@ export class FakeFsOnedrive extends FakeFs {
 
   async getRevokeAddr() {
     return "https://account.live.com/consent/Manage";
+  }
+
+  allowEmptyFile(): boolean {
+    return false;
   }
 }

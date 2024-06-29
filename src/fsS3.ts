@@ -1,36 +1,37 @@
-import type { _Object, PutObjectCommandInput } from "@aws-sdk/client-s3";
+import { Buffer } from "buffer";
+import * as path from "path";
+import { Readable } from "stream";
+import type { PutObjectCommandInput, _Object } from "@aws-sdk/client-s3";
 import {
   DeleteObjectCommand,
   GetObjectCommand,
   HeadObjectCommand,
-  HeadObjectCommandOutput,
+  type HeadObjectCommandOutput,
   ListObjectsV2Command,
-  ListObjectsV2CommandInput,
+  type ListObjectsV2CommandInput,
   PutObjectCommand,
   S3Client,
 } from "@aws-sdk/client-s3";
 import { Upload } from "@aws-sdk/lib-storage";
-import { HttpRequest, HttpResponse } from "@smithy/protocol-http";
+import type { HttpHandlerOptions } from "@aws-sdk/types";
 import {
   FetchHttpHandler,
-  FetchHttpHandlerOptions,
+  type FetchHttpHandlerOptions,
 } from "@smithy/fetch-http-handler";
 // @ts-ignore
 import { requestTimeout } from "@smithy/fetch-http-handler/dist-es/request-timeout";
+import { type HttpRequest, HttpResponse } from "@smithy/protocol-http";
 import { buildQueryString } from "@smithy/querystring-builder";
-import { HttpHandlerOptions } from "@aws-sdk/types";
-import { Buffer } from "buffer";
-import * as mime from "mime-types";
-import { Platform, requestUrl, RequestUrlParam } from "obsidian";
-import { Readable } from "stream";
-import * as path from "path";
+// biome-ignore lint/suspicious/noShadowRestrictedNames: <explanation>
 import AggregateError from "aggregate-error";
-import { DEFAULT_CONTENT_TYPE, S3Config } from "./baseTypes";
+import * as mime from "mime-types";
+import { Platform, type RequestUrlParam, requestUrl } from "obsidian";
+import PQueue from "p-queue";
+import { DEFAULT_CONTENT_TYPE, type S3Config } from "./baseTypes";
 import { VALID_REQURL } from "./baseTypesObs";
 import { bufferToArrayBuffer, getFolderLevels } from "./misc";
-import PQueue from "p-queue";
 
-import { Entity } from "./baseTypes";
+import type { Entity } from "./baseTypes";
 import { FakeFs } from "./fsAll";
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -308,7 +309,14 @@ const fromS3ObjectToEntity = (
 ) => {
   // console.debug(`fromS3ObjectToEntity: ${x.Key!}, ${JSON.stringify(x,null,2)}`);
   // S3 officially only supports seconds precision!!!!!
-  const mtimeSvr = Math.floor(x.LastModified!.valueOf() / 1000.0) * 1000;
+  if (x.LastModified === undefined) {
+    throw Error(
+      `s3 object ${x.Key!} doesn't have LastModified value: ${JSON.stringify(
+        x
+      )}`
+    );
+  }
+  const mtimeSvr = Math.floor(x.LastModified.valueOf() / 1000.0) * 1000;
   let mtimeCli = mtimeSvr;
   if (x.Key! in mtimeRecords) {
     const m2 = mtimeRecords[x.Key!];
@@ -340,15 +348,23 @@ const fromS3ObjectToEntity = (
 const fromS3HeadObjectToEntity = (
   fileOrFolderPathWithRemotePrefix: string,
   x: HeadObjectCommandOutput,
-  remotePrefix: string
+  remotePrefix: string,
+  useAccurateMTime: boolean
 ) => {
   // console.debug(`fromS3HeadObjectToEntity: ${fileOrFolderPathWithRemotePrefix}: ${JSON.stringify(x,null,2)}`);
   // S3 officially only supports seconds precision!!!!!
-  const mtimeSvr = Math.floor(x.LastModified!.valueOf() / 1000.0) * 1000;
+  if (x.LastModified === undefined) {
+    throw Error(
+      `s3 object ${fileOrFolderPathWithRemotePrefix} doesn't have LastModified value: ${JSON.stringify(
+        x
+      )}`
+    );
+  }
+  const mtimeSvr = Math.floor(x.LastModified.valueOf() / 1000.0) * 1000;
   let mtimeCli = mtimeSvr;
-  if (x.Metadata !== undefined) {
+  if (useAccurateMTime && x.Metadata !== undefined) {
     const m2 = Math.floor(
-      parseFloat(x.Metadata.mtime || x.Metadata.MTime || "0")
+      Number.parseFloat(x.Metadata.mtime || x.Metadata.MTime || "0")
     );
     if (m2 !== 0) {
       // to be compatible with RClone, we read and store the time in seconds in new version!
@@ -397,9 +413,16 @@ export class FakeFsS3 extends FakeFs {
   }
 
   async walk(): Promise<Entity[]> {
-    const res = (await this._walkFromRoot(this.s3Config.remotePrefix)).filter(
-      (x) => x.key !== "" && x.key !== "/"
-    );
+    const res = (
+      await this._walkFromRoot(this.s3Config.remotePrefix, false)
+    ).filter((x) => x.key !== "" && x.key !== "/");
+    return res;
+  }
+
+  async walkPartial(): Promise<Entity[]> {
+    const res = (
+      await this._walkFromRoot(this.s3Config.remotePrefix, true)
+    ).filter((x) => x.key !== "" && x.key !== "/");
     return res;
   }
 
@@ -407,19 +430,23 @@ export class FakeFsS3 extends FakeFs {
    * the input key contains basedir (prefix),
    * but the result doesn't contain it.
    */
-  async _walkFromRoot(prefixOfRawKeys: string | undefined) {
+  async _walkFromRoot(prefixOfRawKeys: string | undefined, partial: boolean) {
     const confCmd = {
       Bucket: this.s3Config.s3BucketName,
     } as ListObjectsV2CommandInput;
     if (prefixOfRawKeys !== undefined && prefixOfRawKeys !== "") {
       confCmd.Prefix = prefixOfRawKeys;
     }
+    if (partial) {
+      confCmd.MaxKeys = 10; // no need to list more!
+    }
 
     const contents = [] as _Object[];
     const mtimeRecords: Record<string, number> = {};
     const ctimeRecords: Record<string, number> = {};
+    const partsConcurrency = partial ? 1 : this.s3Config.partsConcurrency;
     const queueHead = new PQueue({
-      concurrency: this.s3Config.partsConcurrency,
+      concurrency: partsConcurrency,
       autoStart: true,
     });
     queueHead.on("error", (error) => {
@@ -457,12 +484,12 @@ export class FakeFsS3 extends FakeFs {
               // pass
             } else {
               mtimeRecords[content.Key!] = Math.floor(
-                parseFloat(
+                Number.parseFloat(
                   rspHead.Metadata.mtime || rspHead.Metadata.MTime || "0"
                 )
               );
               ctimeRecords[content.Key!] = Math.floor(
-                parseFloat(
+                Number.parseFloat(
                   rspHead.Metadata.ctime || rspHead.Metadata.CTime || "0"
                 )
               );
@@ -471,14 +498,20 @@ export class FakeFsS3 extends FakeFs {
         }
       }
 
-      isTruncated = rsp.IsTruncated ?? false;
-      confCmd.ContinuationToken = rsp.NextContinuationToken;
-      if (
-        isTruncated &&
-        (confCmd.ContinuationToken === undefined ||
-          confCmd.ContinuationToken === "")
-      ) {
-        throw Error("isTruncated is true but no continuationToken provided");
+      if (partial) {
+        // do not loop over
+        isTruncated = false;
+      } else {
+        // loop over
+        isTruncated = rsp.IsTruncated ?? false;
+        confCmd.ContinuationToken = rsp.NextContinuationToken;
+        if (
+          isTruncated &&
+          (confCmd.ContinuationToken === undefined ||
+            confCmd.ContinuationToken === "")
+        ) {
+          throw Error("isTruncated is true but no continuationToken provided");
+        }
       }
     } while (isTruncated);
 
@@ -561,7 +594,12 @@ export class FakeFsS3 extends FakeFs {
       })
     );
 
-    return fromS3HeadObjectToEntity(key, res, this.s3Config.remotePrefix ?? "");
+    return fromS3HeadObjectToEntity(
+      key,
+      res,
+      this.s3Config.remotePrefix ?? "",
+      this.s3Config.useAccurateMTime ?? false
+    );
   }
 
   async mkdir(key: string, mtime?: number, ctime?: number): Promise<Entity> {
@@ -722,27 +760,52 @@ export class FakeFsS3 extends FakeFs {
     return bodyContents;
   }
 
+  async rename(key1: string, key2: string): Promise<void> {
+    throw Error(`rename not implemented for s3`);
+  }
+
   async rm(key: string): Promise<void> {
     if (key === "/") {
       return;
     }
 
-    if (this.synthFoldersCache.hasOwnProperty(key)) {
-      delete this.synthFoldersCache[key];
-      return;
+    if (key.endsWith("/")) {
+      if (this.synthFoldersCache.hasOwnProperty(key)) {
+        delete this.synthFoldersCache[key];
+        return;
+      }
+
+      // in s3 the folder may not exist, so we make our best effort.
+      // do NOT read this.s3Config.generateFolderObject
+      // because the folder might be generated by previous setting
+      try {
+        const remoteFileName = getRemoteWithPrefixPath(
+          key,
+          this.s3Config.remotePrefix ?? ""
+        );
+
+        await this.s3Client.send(
+          new DeleteObjectCommand({
+            Bucket: this.s3Config.s3BucketName,
+            Key: remoteFileName,
+          })
+        );
+      } catch (e) {
+        // pass
+      }
+    } else {
+      const remoteFileName = getRemoteWithPrefixPath(
+        key,
+        this.s3Config.remotePrefix ?? ""
+      );
+
+      await this.s3Client.send(
+        new DeleteObjectCommand({
+          Bucket: this.s3Config.s3BucketName,
+          Key: remoteFileName,
+        })
+      );
     }
-
-    const remoteFileName = getRemoteWithPrefixPath(
-      key,
-      this.s3Config.remotePrefix ?? ""
-    );
-
-    await this.s3Client.send(
-      new DeleteObjectCommand({
-        Bucket: this.s3Config.s3BucketName,
-        Key: remoteFileName,
-      })
-    );
 
     // TODO: do we need to delete folder recursively?
     // maybe we should not
@@ -752,13 +815,6 @@ export class FakeFsS3 extends FakeFs {
 
   async checkConnect(callbackFunc?: any): Promise<boolean> {
     try {
-      // TODO: no universal way now, just check this in connectivity
-      if (Platform.isIosApp && this.s3Config.s3Endpoint.startsWith("http://")) {
-        throw Error(
-          `Your s3 endpoint could only be https, not http, because of the iOS restriction.`
-        );
-      }
-
       // const results = await this.s3Client.send(
       //   new HeadBucketCommand({ Bucket: this.s3Config.s3BucketName })
       // );
@@ -809,5 +865,9 @@ export class FakeFsS3 extends FakeFs {
 
   async revokeAuth() {
     throw new Error("Method not implemented.");
+  }
+
+  allowEmptyFile(): boolean {
+    return true;
   }
 }

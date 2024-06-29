@@ -1,13 +1,14 @@
-import { FakeFs } from "./fsAll";
 import { Dropbox, DropboxAuth } from "dropbox";
-import type { files, DropboxResponseError, DropboxResponse } from "dropbox";
-import {
-  DropboxConfig,
-  COMMAND_CALLBACK_DROPBOX,
-  OAUTH2_FORCE_EXPIRE_MILLISECONDS,
-  Entity,
-} from "./baseTypes";
+import type { DropboxResponse, DropboxResponseError, files } from "dropbox";
 import random from "lodash/random";
+import {
+  COMMAND_CALLBACK_DROPBOX,
+  DROPBOX_APP_KEY,
+  type DropboxConfig,
+  type Entity,
+  OAUTH2_FORCE_EXPIRE_MILLISECONDS,
+} from "./baseTypes";
+import { FakeFs } from "./fsAll";
 import {
   bufferToArrayBuffer,
   delay,
@@ -21,7 +22,7 @@ export { Dropbox } from "dropbox";
 
 export const DEFAULT_DROPBOX_CONFIG: DropboxConfig = {
   accessToken: "",
-  clientID: process.env.DEFAULT_DROPBOX_APP_KEY ?? "",
+  clientID: DROPBOX_APP_KEY ?? "",
   refreshToken: "",
   accessTokenExpiresInSeconds: 0,
   accessTokenExpiresAtTime: 0,
@@ -134,7 +135,7 @@ export const fixEntityListCasesInplace = (entities: { key?: string }[]) => {
         caseMapping[newKey.toLocaleLowerCase()] = newKey;
         e.key = newKey;
         // console.log(JSON.stringify(caseMapping,null,2));
-        continue;
+        // continue;
       } else {
         throw Error(`${parentFolder} doesn't have cases record??`);
       }
@@ -145,7 +146,7 @@ export const fixEntityListCasesInplace = (entities: { key?: string }[]) => {
           .slice(-1)
           .join("/")}`;
         e.key = newKey;
-        continue;
+        // continue;
       } else {
         throw Error(`${parentFolder} doesn't have cases record??`);
       }
@@ -167,7 +168,7 @@ interface ErrSubType {
 
 async function retryReq<T>(
   reqFunc: () => Promise<DropboxResponse<T>>,
-  extraHint: string = ""
+  extraHint = ""
 ): Promise<DropboxResponse<T> | undefined> {
   const waitSeconds = [1, 2, 4, 8]; // hard code exponential backoff
   for (let idx = 0; idx < waitSeconds.length; ++idx) {
@@ -205,7 +206,7 @@ async function retryReq<T>(
       const headers = headersToRecord(err.headers);
       const svrSec =
         err.error.error.retry_after ||
-        parseInt(headers["retry-after"] || "1") ||
+        Number.parseInt(headers["retry-after"] || "1") ||
         1;
       const fallbackSec = waitSeconds[idx];
       const secMin = Math.max(svrSec, fallbackSec);
@@ -233,7 +234,7 @@ async function retryReq<T>(
 
 export const getAuthUrlAndVerifier = async (
   appKey: string,
-  needManualPatse: boolean = false
+  needManualPatse = false
 ) => {
   const auth = new DropboxAuth({
     clientId: appKey,
@@ -328,9 +329,9 @@ export const setConfigBySuccessfullAuthInplace = async (
   console.info("start updating local info of Dropbox token");
 
   config.accessToken = authRes.access_token;
-  config.accessTokenExpiresInSeconds = parseInt(authRes.expires_in);
+  config.accessTokenExpiresInSeconds = Number.parseInt(authRes.expires_in);
   config.accessTokenExpiresAtTime =
-    Date.now() + parseInt(authRes.expires_in) * 1000 - 10 * 1000;
+    Date.now() + Number.parseInt(authRes.expires_in) * 1000 - 10 * 1000;
 
   // manually set it expired after 80 days;
   config.credentialsShouldBeDeletedAtTime =
@@ -452,13 +453,21 @@ export class FakeFsDropbox extends FakeFs {
   }
 
   async walk(): Promise<Entity[]> {
+    return await this._walk(false);
+  }
+
+  async walkPartial(): Promise<Entity[]> {
+    return await this._walk(true);
+  }
+
+  async _walk(partial: boolean): Promise<Entity[]> {
     await this._init();
 
     let res = await this.dropbox.filesListFolder({
       path: `/${this.remoteBaseDir}`,
-      recursive: true,
+      recursive: !partial,
       include_deleted: false,
-      limit: 1000,
+      limit: partial ? 10 : 1000,
     });
     if (res.status !== 200) {
       throw Error(JSON.stringify(res));
@@ -471,20 +480,22 @@ export class FakeFsDropbox extends FakeFs {
       .filter((x) => x.path_display !== `/${this.remoteBaseDir}`)
       .map((x) => fromDropboxItemToEntity(x, this.remoteBaseDir));
 
-    while (res.result.has_more) {
-      res = await this.dropbox.filesListFolderContinue({
-        cursor: res.result.cursor,
-      });
-      if (res.status !== 200) {
-        throw Error(JSON.stringify(res));
-      }
+    if (!partial) {
+      while (res.result.has_more) {
+        res = await this.dropbox.filesListFolderContinue({
+          cursor: res.result.cursor,
+        });
+        if (res.status !== 200) {
+          throw Error(JSON.stringify(res));
+        }
 
-      const contents2 = res.result.entries;
-      const unifiedContents2 = contents2
-        .filter((x) => x[".tag"] !== "deleted")
-        .filter((x) => x.path_display !== `/${this.remoteBaseDir}`)
-        .map((x) => fromDropboxItemToEntity(x, this.remoteBaseDir));
-      unifiedContents.push(...unifiedContents2);
+        const contents2 = res.result.entries;
+        const unifiedContents2 = contents2
+          .filter((x) => x[".tag"] !== "deleted")
+          .filter((x) => x.path_display !== `/${this.remoteBaseDir}`)
+          .map((x) => fromDropboxItemToEntity(x, this.remoteBaseDir));
+        unifiedContents.push(...unifiedContents2);
+      }
     }
 
     fixEntityListCasesInplace(unifiedContents);
@@ -685,6 +696,25 @@ export class FakeFsDropbox extends FakeFs {
     }
   }
 
+  async rename(key1: string, key2: string): Promise<void> {
+    const remoteFileName1 = getDropboxPath(key1, this.remoteBaseDir);
+    const remoteFileName2 = getDropboxPath(key2, this.remoteBaseDir);
+    await this._init();
+    try {
+      await retryReq(
+        () =>
+          this.dropbox.filesMoveV2({
+            from_path: remoteFileName1,
+            to_path: remoteFileName2,
+          }),
+        `${key1}=>${key2}` // just a hint here
+      );
+    } catch (err) {
+      console.error("some error while moving");
+      console.error(err);
+    }
+  }
+
   async rm(key: string): Promise<void> {
     if (key === "/") {
       return;
@@ -735,5 +765,9 @@ export class FakeFsDropbox extends FakeFs {
     } catch (e) {
       return false;
     }
+  }
+
+  allowEmptyFile(): boolean {
+    return true;
   }
 }

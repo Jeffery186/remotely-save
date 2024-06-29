@@ -1,10 +1,10 @@
-import { CipherMethodType, Entity } from "./baseTypes";
+import type { CipherMethodType, Entity } from "./baseTypes";
 import * as openssl from "./encryptOpenSSL";
 import * as rclone from "./encryptRClone";
-import { isVaildText } from "./misc";
+import { isSpecialFolderNameToSkip, isVaildText } from "./misc";
 
-import { FakeFs } from "./fsAll";
 import cloneDeep from "lodash/cloneDeep";
+import { FakeFs } from "./fsAll";
 
 /**
  * quick guess, no actual decryption here
@@ -78,8 +78,6 @@ export class FakeFsEncrypt extends FakeFs {
   cacheMapOrigToEnc: Record<string, string>;
   hasCacheMap: boolean;
   kind: string;
-  innerWalkResultCache?: Entity[];
-  innerWalkResultCacheTime?: number;
 
   constructor(innerFs: FakeFs, password: string, method: CipherMethodType) {
     super();
@@ -89,9 +87,12 @@ export class FakeFsEncrypt extends FakeFs {
     this.cacheMapOrigToEnc = {};
     this.hasCacheMap = false;
 
-    this.kind = `encrypt(${this.innerFs.kind},${method})`;
+    this.kind = `encrypt(${this.innerFs.kind},${
+      this.password !== "" ? method : "no password"
+    })`;
 
-    if (method === "rclone-base64") {
+    if (this.password !== "" && method === "rclone-base64") {
+      // no need to init if no password or not rclone
       this.cipherRClone = new rclone.CipherRclone(password, 5);
     }
   }
@@ -110,26 +111,8 @@ export class FakeFsEncrypt extends FakeFs {
     throw Error(`no idea about isFolderAware for method=${this.method}`);
   }
 
-  /**
-   * we want a little caching here.
-   */
-  async _getInnerWalkResult(): Promise<Entity[]> {
-    let innerWalkResult: Entity[] | undefined = undefined;
-    if (
-      this.innerWalkResultCacheTime !== undefined &&
-      this.innerWalkResultCacheTime >= Date.now() - 1000
-    ) {
-      innerWalkResult = this.innerWalkResultCache!;
-    } else {
-      innerWalkResult = await this.innerFs.walk();
-      this.innerWalkResultCache = innerWalkResult;
-      this.innerWalkResultCacheTime = Date.now();
-    }
-    return innerWalkResult;
-  }
-
   async isPasswordOk(): Promise<PasswordCheckType> {
-    const innerWalkResult = await this._getInnerWalkResult();
+    const innerWalkResult = await this.walkPartial();
 
     if (innerWalkResult === undefined || innerWalkResult.length === 0) {
       // remote empty
@@ -155,6 +138,8 @@ export class FakeFsEncrypt extends FakeFs {
         };
       }
     } else {
+      // the config has a password
+
       if (this.method === "unknown") {
         return {
           ok: false,
@@ -186,8 +171,16 @@ export class FakeFsEncrypt extends FakeFs {
   }
 
   async walk(): Promise<Entity[]> {
-    const innerWalkResult = await this._getInnerWalkResult();
+    const innerWalkResult = await this.innerFs.walk();
+    return await this._dealWithWalk(innerWalkResult);
+  }
 
+  async walkPartial(): Promise<Entity[]> {
+    const innerWalkResult = await this.innerFs.walkPartial();
+    return await this._dealWithWalk(innerWalkResult);
+  }
+
+  async _dealWithWalk(innerWalkResult: Entity[]): Promise<Entity[]> {
     const res: Entity[] = [];
 
     if (this.isPasswordEmpty()) {
@@ -199,6 +192,10 @@ export class FakeFsEncrypt extends FakeFs {
       return res;
     } else {
       for (const innerEntity of innerWalkResult) {
+        if (isSpecialFolderNameToSkip(innerEntity.keyRaw, [])) {
+          continue;
+        }
+
         const key = await this._decryptName(innerEntity.keyRaw);
         const size = key.endsWith("/") ? 0 : undefined;
         res.push({
@@ -273,9 +270,13 @@ export class FakeFsEncrypt extends FakeFs {
       return copyEntityAndCopyKeyEncSizeEnc(innerEntity);
     } else {
       const now = Date.now();
+      let content = new ArrayBuffer(0);
+      if (!this.innerFs.allowEmptyFile()) {
+        content = new ArrayBuffer(1);
+      }
       const innerEntity = await this.innerFs.writeFile(
         keyEnc,
-        new ArrayBuffer(0),
+        content,
         mtime ?? now,
         ctime ?? now
       );
@@ -360,6 +361,31 @@ export class FakeFsEncrypt extends FakeFs {
       const res = await this._decryptContent(contentEnc);
       return res;
     }
+  }
+
+  async rename(key1: string, key2: string): Promise<void> {
+    if (!this.hasCacheMap) {
+      throw new Error("You have to build the cacheMap firstly for readFile");
+    }
+    let key1Enc = this.cacheMapOrigToEnc[key1];
+    if (key1Enc === undefined) {
+      if (this.isPasswordEmpty()) {
+        key1Enc = key1;
+      } else {
+        key1Enc = await this._encryptName(key1);
+      }
+      this.cacheMapOrigToEnc[key1] = key1Enc;
+    }
+    let key2Enc = this.cacheMapOrigToEnc[key2];
+    if (key2Enc === undefined) {
+      if (this.isPasswordEmpty()) {
+        key2Enc = key2;
+      } else {
+        key2Enc = await this._encryptName(key2);
+      }
+      this.cacheMapOrigToEnc[key2] = key2Enc;
+    }
+    return await this.innerFs.rename(key1Enc, key2Enc);
   }
 
   async rm(key: string): Promise<void> {
@@ -553,5 +579,9 @@ export class FakeFsEncrypt extends FakeFs {
 
   async revokeAuth(): Promise<any> {
     return await this.innerFs.revokeAuth();
+  }
+
+  allowEmptyFile(): boolean {
+    return true;
   }
 }

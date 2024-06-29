@@ -1,5 +1,9 @@
-import { cloneDeep, isEqual } from "lodash";
-import { DEFAULT_CONTENT_TYPE, Entity, WebdisConfig } from "./baseTypes";
+import { isEqual } from "lodash";
+import {
+  DEFAULT_CONTENT_TYPE,
+  type Entity,
+  type WebdisConfig,
+} from "./baseTypes";
 import { FakeFs } from "./fsAll";
 
 export const DEFAULT_WEBDIS_CONFIG: WebdisConfig = {
@@ -129,6 +133,25 @@ export class FakeFsWebdis extends FakeFs {
     return res;
   }
 
+  async walkPartial(): Promise<Entity[]> {
+    let cursor = "0";
+    const res: Entity[] = [];
+    const command = `SCAN/${cursor}/MATCH/rs:fs:v1:*:meta/COUNT/10`; // fewer keys
+    const rsp = (await (await this._fetchCommand("GET", command)).json())[
+      "SCAN"
+    ];
+    // console.debug(rsp);
+    cursor = rsp[0];
+    for (const fullKeyWithMeta of rsp[1]) {
+      const realKey = getOrigPath(fullKeyWithMeta, this.remoteBaseDir);
+      res.push(await this.stat(realKey));
+    }
+    // no need to loop over cursor
+    // console.debug(`walk res:`);
+    // console.debug(res);
+    return res;
+  }
+
   async stat(key: string): Promise<Entity> {
     const fullKey = getWebdisPath(key, this.remoteBaseDir);
     return await this._statFromRaw(fullKey);
@@ -149,10 +172,10 @@ export class FakeFsWebdis extends FakeFs {
     return {
       key: realKey,
       keyRaw: realKey,
-      mtimeCli: parseInt(rsp["mtime"]),
-      mtimeSvr: parseInt(rsp["mtime"]),
-      size: parseInt(rsp["size"]),
-      sizeRaw: parseInt(rsp["size"]),
+      mtimeCli: Number.parseInt(rsp["mtime"]),
+      mtimeSvr: Number.parseInt(rsp["mtime"]),
+      size: Number.parseInt(rsp["size"]),
+      sizeRaw: Number.parseInt(rsp["size"]),
     };
   }
 
@@ -207,6 +230,15 @@ export class FakeFsWebdis extends FakeFs {
     return rsp;
   }
 
+  async rename(key1: string, key2: string): Promise<void> {
+    const fullKey1 = getWebdisPath(key1, this.remoteBaseDir);
+    const fullKey2 = getWebdisPath(key2, this.remoteBaseDir);
+    const commandContent = `RENAME/${fullKey1}:content/${fullKey2}:content`;
+    await this._fetchCommand("POST", commandContent);
+    const commandMeta = `RENAME/${fullKey1}:meta/${fullKey2}:meta`;
+    await this._fetchCommand("POST", commandMeta);
+  }
+
   async rm(key: string): Promise<void> {
     const fullKey = getWebdisPath(key, this.remoteBaseDir);
     const command = `DEL/${fullKey}:meta/${fullKey}:content`;
@@ -234,5 +266,9 @@ export class FakeFsWebdis extends FakeFs {
 
   async revokeAuth(): Promise<any> {
     throw new Error("Method not implemented.");
+  }
+
+  allowEmptyFile(): boolean {
+    return true;
   }
 }

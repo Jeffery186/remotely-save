@@ -1,4 +1,4 @@
-import { Entity } from "./baseTypes";
+import type { Entity } from "./baseTypes";
 import { FakeFs } from "./fsAll";
 
 export class FakeFsMock extends FakeFs {
@@ -11,6 +11,10 @@ export class FakeFsMock extends FakeFs {
 
   async walk(): Promise<Entity[]> {
     throw new Error("Method not implemented.");
+  }
+
+  async walkPartial(): Promise<Entity[]> {
+    return await this.walk();
   }
 
   async stat(key: string): Promise<Entity> {
@@ -34,6 +38,10 @@ export class FakeFsMock extends FakeFs {
     throw new Error("Method not implemented.");
   }
 
+  async rename(key1: string, key2: string): Promise<void> {
+    throw new Error("Method not implemented.");
+  }
+
   async rm(key: string): Promise<void> {
     throw new Error("Method not implemented.");
   }
@@ -47,6 +55,10 @@ export class FakeFsMock extends FakeFs {
   }
 
   async revokeAuth(): Promise<any> {
+    throw new Error("Method not implemented.");
+  }
+
+  allowEmptyFile(): boolean {
     throw new Error("Method not implemented.");
   }
 }
